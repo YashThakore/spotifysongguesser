@@ -14,33 +14,55 @@ const clientId = process.env.SPOTIFY_CLIENT_ID;
 const clientSecret = process.env.SPOTIFY_CLIENT_SECRET;
 
 async function getAccessToken() {
-  const response = await axios.post('https://accounts.spotify.com/api/token', new URLSearchParams({
-    grant_type: 'client_credentials'
-  }), {
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'Authorization': 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64')
-    }
-  });
-  return response.data.access_token;
+  try {
+    const response = await axios.post('https://accounts.spotify.com/api/token', new URLSearchParams({
+      grant_type: 'client_credentials'
+    }), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Authorization': 'Basic ' + Buffer.from(clientId + ':' + clientSecret).toString('base64')
+      }
+    });
+    return response.data.access_token;
+  } catch (error) {
+    console.error('Error fetching access token:', error);
+    throw new Error('Failed to fetch access token');
+  }
 }
 
-async function getAudioPreview(trackId) {
-  const url = `https://open.spotify.com/embed/track/${trackId}?utm_source=discord&utm_medium=desktop`;
-  const response = await axios.get(url);
-  const $ = cheerio.load(response.data);
+async function getScrapedData(trackId) {
+  try {
+    const url = `https://open.spotify.com/embed/track/${trackId}?utm_source=discord&utm_medium=desktop`;
+    const response = await axios.get(url);
+    const $ = cheerio.load(response.data);
 
-  let audioPreviewUrl = null;
-  $('script').each((i, script) => {
-    const scriptContent = $(script).html();
-    const match = scriptContent.match(/"audioPreview":"(.*?)"/);
-    console.log(match)
-    if (match && match[1]) {
-      audioPreviewUrl = match[1].replace(/\\u002F/g, '/');
-    }
-  });
+    let trackData = null;
 
-  return audioPreviewUrl;
+    // Extract JSON data from <script id="__NEXT_DATA__">
+    $('script#__NEXT_DATA__').each((i, script) => {
+      const scriptContent = $(script).html();
+      try {
+        const jsonData = JSON.parse(scriptContent);
+        const track = jsonData.props.pageProps.state.data.entity;
+
+        trackData = {
+          name: track.name,
+          artists: track.artists.map(artist => artist.name).join(', '),
+          coverArt: track.coverArt.sources[0]?.url || 'https://via.placeholder.com/150', // Fallback URL
+          releaseDate: track.releaseDate?.isoString || 'N/A',
+          duration: track.duration || 'N/A',
+          audioPreviewUrl: track.audioPreview?.url || ''
+        };
+      } catch (error) {
+        console.error('Error parsing JSON:', error);
+      }
+    });
+
+    return trackData || { coverArt: 'https://via.placeholder.com/150' }; // Default to placeholder if no data
+  } catch (error) {
+    console.error('Error scraping data:', error);
+    return { coverArt: 'https://via.placeholder.com/150' }; // Default to placeholder if error
+  }
 }
 
 app.get('/api/token', async (req, res) => {
@@ -52,11 +74,16 @@ app.get('/api/token', async (req, res) => {
   }
 });
 
-app.post('/api/preview-url', async (req, res) => {
-  const { trackId } = req.body;
+app.post('/api/scrape', async (req, res) => {
+  const { trackIds } = req.body;
   try {
-    const audioPreviewUrl = await getAudioPreview(trackId);
-    res.json({ audioPreviewUrl });
+    const scrapePromises = trackIds.map(async (trackId) => {
+      const scrapedData = await getScrapedData(trackId);
+      return { trackId, scrapedData };
+    });
+
+    const results = await Promise.all(scrapePromises);
+    res.json(results);
   } catch (error) {
     res.status(400).json({ error: error.message });
   }
